@@ -1,0 +1,9 @@
+FROM python:latest
+
+ADD producer.py ./
+
+RUN pip install kafka-python
+RUN pip install numpy
+RUN pip install pandas
+
+CMD ["python", "producer.py"]

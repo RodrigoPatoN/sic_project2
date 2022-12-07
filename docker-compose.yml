@@ -4,7 +4,7 @@ services:
 
   influxdb:
 
-    image: influxdb
+    image: influxdb:1.8.10
     container_name: influxdb
     restart: always
 
@@ -12,13 +12,28 @@ services:
       - 8086:8086
 
     environment:
-      INFLUXDB_HTTP_AUTH_ENABLED: "true"
-      INFLUXDB_DB: "weather"
-      INFLUXDB_ADMIN_USER: "admin"
-      INFLUXDB_ADMIN_PASSWORD: "adminadmin"
+      - INFLUXDB_DB=weather
 
     volumes:
       - ./data/influxdb:/var/lib/influxdb
+
+
+  kapacitor:
+
+    image: kapacitor
+    container_name: kapacitor
+    restart: always
+
+    ports:
+      - 9095:9095
+
+    volumes:
+      - ./kapacitor.conf:/etc/kapacitor/kapacitor.conf
+      - ./data/kapacitor:/var/lib/kapacitor
+
+    depends_on:
+      - rabbitmq
+      - influxdb
 
 
   chronograf:
@@ -31,8 +46,7 @@ services:
       - 8888:8888
 
     environment:
-      INFLUXDB_URL: "http://influxdb:8086"
-      #KAPACITOR_URL: "http://kapacitor:9092"
+      - INFLUXDB_URL=http://influxdb:8086
 
     volumes:
       - ./data/chronograf:/var/lib/chronograf
@@ -47,15 +61,75 @@ services:
       container_name: telegraf
       restart: always
   
-      environment:
-        HOST_NAME: "telegraf"
-        INFLUXDB_URL: "http://influxdb:8086"
-        INFLUXDB_DATABASE: "weather"
-        INFLUXDB_USERNAME: "admin"
-        INFLUXDB_PASSWORD: "adminadmin"
-  
       volumes:
         - ./telegraf.conf:/etc/telegraf/telegraf.conf
 
       depends_on:
         - influxdb
+        - rabbitmq
+        - kafka-server
+
+
+  kafka-server:
+  
+      image: bitnami/kafka
+  
+      ports:
+        - "9092:9092"
+  
+      environment:
+        ALLOW_PLAINTEXT_LISTENER: "yes"
+        KAFKA_CFG_ZOOKEEPER_CONNECT: kafka-zookeeper:2181
+        KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+        KAFKA_CFG_LISTENERS: CLIENT://:9092,EXTERNAL://:9093
+        KAFKA_CFG_ADVERTISED_LISTENERS: CLIENT://kafka-server:9092,EXTERNAL://kafka-server:9093
+        KAFKA_CFG_INTER_BROKER_LISTENER_NAME: CLIENT
+        KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+      depends_on:
+        - kafka-zookeeper
+
+
+  kafka-zookeeper:
+    
+        image: bitnami/zookeeper
+    
+        environment:
+          ALLOW_ANONYMOUS_LOGIN: "yes"
+
+
+  publisher:
+
+    build: ./producer/
+
+    depends_on:
+     - kafka-server
+
+    volumes:
+      - ./producer/:/./producer/
+
+    command: python3 producer.py
+
+
+  rabbitmq:
+  
+    build: ./rabbitmq      
+
+    container_name: rabbitmq
+
+    ports:
+      - 1883:1883
+      - 15672:15672
+
+
+  predictor:
+
+    build: ./test_predict/
+
+    depends_on:
+     - rabbitmq
+
+    volumes:
+      - ./test_predict/:/./test_predict/
+
+    command: python3 test.py

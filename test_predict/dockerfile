@@ -1,0 +1,7 @@
+FROM python:latest
+
+ADD test.py ./
+
+RUN pip install paho-mqtt
+
+CMD ["python", "test.py"]
