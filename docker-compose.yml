@@ -15,7 +15,11 @@ services:
       - INFLUXDB_DB=weather
 
     volumes:
-      - ./data/influxdb:/var/lib/influxdb
+      - data:/var/lib/influxdb
+   
+    networks:
+      - telegraf-influxdb
+      - influxdb-chronograf
 
 
   kapacitor:
@@ -29,11 +33,23 @@ services:
 
     volumes:
       - ./kapacitor.conf:/etc/kapacitor/kapacitor.conf
-      - ./data/kapacitor:/var/lib/kapacitor
+      - data:/var/lib/kapacitor
+      - ./TICK_scripts/:/./TICK_scripts
+
+    networks:
+      - mqtt-kapacitor
+      - influxdb-chronograf
+
+    command: bash -c "
+      kapacitor define temperature_alert -tick ./TICK_scripts/tasks/temperature_alert.tick
+      && kapacitor enable temperature_alert"
 
     depends_on:
-      - rabbitmq
-      - influxdb
+      rabbitmq:
+        condition: service_healthy
+
+      influxdb:
+        condition: service_started
 
 
   chronograf:
@@ -47,55 +63,80 @@ services:
 
     environment:
       - INFLUXDB_URL=http://influxdb:8086
+      - KAPACITOR_URL=http://kapacitor:9095
 
     volumes:
-      - ./data/chronograf:/var/lib/chronograf
+      - data:/var/lib/chronograf
 
     depends_on:
       - influxdb
+      - kapacitor
+   
+    networks:
+      - influxdb-chronograf
 
 
   telegraf:
-  
-      image: telegraf
-      container_name: telegraf
-      restart: always
-  
-      volumes:
-        - ./telegraf.conf:/etc/telegraf/telegraf.conf
 
-      depends_on:
-        - influxdb
-        - rabbitmq
-        - kafka-server
+    image: telegraf
+    container_name: telegraf
+    restart: always
 
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf
+
+    depends_on:
+
+      influxdb:
+        condition: service_started
+
+      kafka-server:
+        condition: service_started
+
+      rabbitmq:
+        condition: service_healthy
+  
+    networks:
+      - kafka-telegraf
+      - kafka-publisher
+      - telegraf-influxdb
+      - mqtt-telegraf
+  
 
   kafka-server:
   
-      image: bitnami/kafka
-  
-      ports:
-        - "9092:9092"
-  
-      environment:
-        ALLOW_PLAINTEXT_LISTENER: "yes"
-        KAFKA_CFG_ZOOKEEPER_CONNECT: kafka-zookeeper:2181
-        KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
-        KAFKA_CFG_LISTENERS: CLIENT://:9092,EXTERNAL://:9093
-        KAFKA_CFG_ADVERTISED_LISTENERS: CLIENT://kafka-server:9092,EXTERNAL://kafka-server:9093
-        KAFKA_CFG_INTER_BROKER_LISTENER_NAME: CLIENT
-        KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+    image: bitnami/kafka
 
-      depends_on:
-        - kafka-zookeeper
+    ports:
+      - "9092:9092"
+
+    environment:
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CFG_ZOOKEEPER_CONNECT: kafka-zookeeper:2181
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_LISTENERS: CLIENT://:9092,EXTERNAL://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: CLIENT://kafka-server:9092,EXTERNAL://kafka-server:9093
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: CLIENT
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+    depends_on:
+      - kafka-zookeeper
+    
+    networks:
+      - kafka-telegraf
+      - kafka-publisher
 
 
   kafka-zookeeper:
     
-        image: bitnami/zookeeper
-    
-        environment:
-          ALLOW_ANONYMOUS_LOGIN: "yes"
+    image: bitnami/zookeeper
+
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+
+    networks:    
+      - kafka-telegraf
+      - kafka-publisher
 
 
   publisher:
@@ -103,10 +144,18 @@ services:
     build: ./producer/
 
     depends_on:
-     - kafka-server
+      kafka-server:
+        condition: service_started
 
     volumes:
       - ./producer/:/./producer/
+
+    deploy:
+      mode: replicated
+      replicas: 4
+   
+    networks:
+      - kafka-publisher
 
     command: python3 producer.py
 
@@ -119,17 +168,44 @@ services:
 
     ports:
       - 1883:1883
-      - 15672:15672
+        
+    networks:
+      - mqtt-telegraf
+      - mqtt-predictor
+      - mqtt-kapacitor
 
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q" ,"ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 5  
 
   predictor:
 
     build: ./test_predict/
 
     depends_on:
-     - rabbitmq
+      rabbitmq:
+        condition: service_healthy
+    
+    networks:
+      - mqtt-telegraf
+      - mqtt-predictor
 
     volumes:
       - ./test_predict/:/./test_predict/
 
     command: python3 test.py
+
+
+networks:
+  kafka-telegraf:
+  kafka-publisher:
+  mqtt-telegraf:
+  mqtt-predictor:
+  mqtt-kapacitor:
+  telegraf-influxdb:
+  influxdb-chronograf:
+
+volumes:
+  data:
